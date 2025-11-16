@@ -1,0 +1,412 @@
+#!usrbinenv python3
+# -- coding utf-8 --
+
+
+Zinseszins-Rechner mit Zwei Szenarien (Tkinter + Matplotlib)
+
+Funktion
+- Zwei getrennte Szenarien mit Eingabefeldern
+  Anfangskapital, monatliche Sparrate, jährlicher Zinssatz (%), Ansparzeit (Jahre),
+  optional gewünschtes Endkapital.
+- Berechnung monatliche & jährliche Verzinsung, Entwicklung über Zeit.
+- Falls Endkapital vorgegeben Berechnung erforderlicher monatlicher Sparrate.
+- Visualisierung beider Szenarien in einem gemeinsamen Diagramm (Matplotlib).
+- Export der Zeitreihen als CSV, Reset-Funktion.
+- Robuste Eingabevalidierung und Fehlerbehandlung.
+
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import math
+import csv
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+import matplotlib
+matplotlib.use(TkAgg)
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+
+# ---------- Hilfsfunktionen  Finanzformeln ----------
+
+def fv_monthly_compound(P float, monthly float, r_annual_pct float, years float) - float
+    Endkapital bei monatlicher Verzinsung mit monatlichen Einzahlungen.
+    Formel FV = P(1 + rn)^(nt) + monthly  ( ( (1 + rn)^(nt) - 1 )  (rn) )
+    n = 12
+    
+    n = 12
+    r = r_annual_pct  100.0
+    periods = n  years
+    if r == 0
+        # Kein Zins
+        return P + monthly  periods
+    monthly_rate = r  n
+    fv_principal = P  (1 + monthly_rate)  periods
+    fv_rentes = monthly  (( (1 + monthly_rate)  periods - 1)  monthly_rate)
+    return fv_principal + fv_rentes
+
+def fv_annual_compound(P float, annual_contribution float, r_annual_pct float, years float) - float
+    Endkapital bei jährlicher Verzinsung mit jährlichen Einzahlungen (Einzahlungen am periodischen Ende angenommen).
+    annual_contribution = monatliche Sparrate  12
+    
+    r = r_annual_pct  100.0
+    t = int(math.floor(years))
+    leftover = years - t  # fractional year handling by linearizing contributions in leftover (approx)
+    if r == 0
+        return P + annual_contribution  years
+    fv = P  (1 + r)  years  # compounding principal continuously in years steps
+    # For regular end-of-year contributions (approx for fractional years we pro-rate)
+    if t == 0
+        # only fractional year - treat contributions as if invested pro rata without interest approx
+        fv += annual_contribution  years
+    else
+        # Sum geometric series for integer years
+        fv += annual_contribution  (((1 + r)  years - 1)  r)
+    return fv
+
+def required_monthly_for_target(P float, r_annual_pct float, years float, target_FV float) - Optional[float]
+    Berechnet die benötigte monatliche Sparrate, um ein Zielkapital zu erreichen.
+    Löst für 'monthly' in FV = P(1+rn)^(nt) + monthly  ( ( (1 + rn)^(nt) - 1 )  (rn) )
+    Gibt None zurück, falls nicht lösbar (z.B. Division durch 0 oder target  P(1+rn)^(nt) bei r0).
+    
+    n = 12
+    r = r_annual_pct  100.0
+    periods = n  years
+    if periods = 0
+        return None
+    if r == 0
+        # Kein Zins monthly = (target - P)  periods
+        return (target_FV - P)  periods
+    monthly_rate = r  n
+    factor = (1 + monthly_rate)  periods
+    denom = (factor - 1)  monthly_rate
+    if denom == 0
+        return None
+    monthly = (target_FV - P  factor)  denom
+    return monthly
+
+def timeseries_monthly(P float, monthly float, r_annual_pct float, years float) - Tuple[np.ndarray, np.ndarray]
+    Erstellt Zeitreihe (monatlich) der Vermögensentwicklung.
+    Rückgabe (array von Jahren (float, z.B. 0, 112, ...), array von Kapitalwerten)
+    
+    n = 12
+    r = r_annual_pct  100.0
+    total_months = int(round(years  n))
+    times = np.linspace(0, years, total_months + 1)
+    balances = np.zeros_like(times)
+    monthly_rate = r  n if r != 0 else 0.0
+    bal = P
+    balances[0] = bal
+    for i in range(1, total_months + 1)
+        # Zins auf bestehenden Bestand
+        bal = bal  (1 + monthly_rate)
+        # Einzahlung am period end
+        bal += monthly
+        balances[i] = bal
+    return times, balances
+
+def timeseries_annual(P float, monthly float, r_annual_pct float, years float) - Tuple[np.ndarray, np.ndarray]
+    Erstellt Zeitreihe (jährlich) der Vermögensentwicklung. Wir summieren monatliche Sparraten zu Jahresbeiträgen.
+    # Jährliche Beiträge
+    annual_contrib = monthly  12.0
+    total_years = int(math.ceil(years))
+    times = np.linspace(0, years, total_years + 1)
+    balances = np.zeros_like(times)
+    bal = P
+    balances[0] = bal
+    r = r_annual_pct  100.0
+    for y in range(1, len(times))
+        # Bei letztem (ev. fractional) Jahr behandeln wir so verzinsen auf die Länge des Jahres
+        delta = times[y] - times[y-1]  # normalerweise 1, außer ev. letzter fractional
+        bal = bal  (1 + r)  delta
+        # fügen Jahresbeitrag hinzu (bei fractional year anteilig)
+        # Wenn delta1, anteiliger Jahresbeitrag
+        bal += annual_contrib  delta
+        balances[y] = bal
+    return times, balances
+
+# ---------- GUI App Definition ----------
+
+@dataclass
+class ScenarioInput
+    Datenklasse für Eingabewerte eines Szenarios
+    principal float = 0.0
+    monthly float = 0.0
+    annual_rate_pct float = 0.0
+    years float = 0.0
+    target Optional[float] = None  # optional gewünschtes Endkapital
+
+class ZinseszinsApp
+    def __init__(self, root tk.Tk)
+        self.root = root
+        self.root.title(Zinseszins-Rechner — 2 Szenarien)
+        self.root.geometry(1100x720)
+        self._build_ui()
+
+    def _build_ui(self)
+        # Frames
+        mainframe = ttk.Frame(self.root, padding=(10,10,10,10))
+        mainframe.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = ttk.Frame(mainframe)
+        input_frame.pack(side=tk.TOP, fill=tk.X)
+
+        # Szenario 1 & 2 Frames
+        self.scenario_frames = []
+        self.entries = []  # list of dicts per scenario
+        for i in range(2)
+            frame = ttk.LabelFrame(input_frame, text=fSzenario {i+1}, padding=(10,10))
+            frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+            self.scenario_frames.append(frame)
+            ent = self._build_scenario_inputs(frame)
+            self.entries.append(ent)
+
+        # Controls (Buttons)
+        control_frame = ttk.Frame(mainframe)
+        control_frame.pack(fill=tk.X, pady=(0,10))
+
+        calc_btn = ttk.Button(control_frame, text=Berechnen, command=self.on_calculate)
+        calc_btn.pack(side=tk.LEFT, padx=5)
+        reset_btn = ttk.Button(control_frame, text=Zurücksetzen, command=self.on_reset)
+        reset_btn.pack(side=tk.LEFT, padx=5)
+        export_btn = ttk.Button(control_frame, text=Exportieren (CSV), command=self.on_export)
+        export_btn.pack(side=tk.LEFT, padx=5)
+
+        # Ergebnis-Labels
+        result_frame = ttk.Frame(mainframe)
+        result_frame.pack(fill=tk.X, pady=(5,10))
+        self.result_text = tk.Text(result_frame, height=6, wrap=tk.WORD)
+        self.result_text.pack(fill=tk.BOTH, expand=True)
+        self.result_text.insert(tk.END, Bitte Eingaben tätigen und 'Berechnen' klicken.n)
+        self.result_text.config(state=tk.DISABLED)
+
+        # Matplotlib-Figur
+        fig_frame = ttk.Frame(mainframe)
+        fig_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.fig = Figure(figsize=(8,5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_xlabel(Jahre)
+        self.ax.set_ylabel(Kapital)
+        self.ax.set_title(Vermögensentwicklung — beide Szenarien)
+        self.ax.grid(True)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=fig_frame)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.pack(fill=tk.BOTH, expand=True)
+
+        # Set default example values
+        self._set_default_values()
+
+    def _build_scenario_inputs(self, parent)
+        Erstellt Eingabefelder und gibt ein Dict mit Entry-Widgets zurück.
+        labels = {
+            principal Anfangskapital (€),
+            monthly Monatliche Sparrate (€),
+            annual_rate Jährlicher Zinssatz (%),
+            years Ansparzeit (Jahre),
+            target Gewünschtes Endkapital (optional €)
+        }
+        entries = {}
+        for key, text in labels.items()
+            row = ttk.Frame(parent)
+            row.pack(fill=tk.X, pady=4)
+            lbl = ttk.Label(row, text=text, width=28, anchor=tk.W)
+            lbl.pack(side=tk.LEFT)
+            ent = ttk.Entry(row)
+            ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            entries[key] = ent
+        # Tooltip  hint
+        hint = ttk.Label(parent, text=Hinweis Felder numerisch. Komma oder Punkt als Dezimaltrenner., foreground=gray)
+        hint.pack(anchor=tk.W, pady=(6,0))
+        return entries
+
+    def _set_default_values(self)
+        # Beispielwerte um UI sofort zu demonstrieren
+        defaults = [
+            {principal 10000, monthly 200, annual_rate 5, years 20, target },
+            {principal 5000, monthly 300, annual_rate 6, years 15, target }
+        ]
+        for ent, d in zip(self.entries, defaults)
+            for k, v in d.items()
+                ent[k].delete(0, tk.END)
+                ent[k].insert(0, v)
+
+    # ---------- Event-Handler ----------
+    def on_reset(self)
+        for ent in self.entries
+            for widget in ent.values()
+                widget.delete(0, tk.END)
+        self._set_default_values()
+        self._clear_results()
+        self.ax.clear()
+        self.ax.set_xlabel(Jahre)
+        self.ax.set_ylabel(Kapital)
+        self.ax.set_title(Vermögensentwicklung — beide Szenarien)
+        self.ax.grid(True)
+        self.canvas.draw()
+
+    def _clear_results(self)
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.config(state=tk.DISABLED)
+
+    def on_export(self)
+        # Exportiert die aktuell im Plot dargestellten Daten als CSV
+        # Fragen Sie den Benutzer nach Dateiort
+        filename = filedialog.asksaveasfilename(
+            defaultextension=.csv,
+            filetypes=[(CSV-Datei, .csv), (Alle Dateien, .)],
+            title=Zeitreihen als CSV speichern
+        )
+        if not filename
+            return
+        # Versuch, Zeitreihen aus der letzten Berechnung zu entnehmen; falls nicht vorhanden, Hinweis
+        if not hasattr(self, export_data) or not self.export_data
+            messagebox.showinfo(Export, Keine Daten zum Exportieren. Bitte zuerst 'Berechnen' klicken.)
+            return
+        try
+            with open(filename, mode=w, newline=, encoding=utf-8) as f
+                writer = csv.writer(f, delimiter=;)
+                # Header schreiben mit Szenario-Markierungen
+                # export_data enthält list of dicts je Szenario
+                # Wir schreiben ein zentrales Zeitfeld (Jahre) und dann Spalten für jede Reihe
+                # Finde maximale Länge
+                times = self.export_data[times]  # gemeinsame Zeitachse (monatlich)
+                header = [Jahr] 
+                for sidx, sname in enumerate([Szenario 1, Szenario 2])
+                    header += [f{sname} (monatlich)]
+                    header += [f{sname} (jährlich)]
+                writer.writerow(header)
+                for i in range(len(times))
+                    row = [f{times[i].6f}]
+                    for s in range(2)
+                        monthly_vals = self.export_data[monthly_vals][s]
+                        annual_vals = self.export_data[annual_vals][s]
+                        # Last element may be shorter for annual - guard
+                        mval = monthly_vals[i] if i  len(monthly_vals) else 
+                        aval = annual_vals[min(i, len(annual_vals)-1)] if len(annual_vals)0 else 
+                        row += [f{mval.2f}, f{aval.2f}]
+                    writer.writerow(row)
+            messagebox.showinfo(Export, fCSV erfolgreich gespeichertn{filename})
+        except Exception as e
+            messagebox.showerror(Fehler, fFehler beim Schreiben der Datein{e})
+
+    def on_calculate(self)
+        # Lese Eingaben, validiere und berechne
+        scenarios = []
+        for idx, ent in enumerate(self.entries)
+            try
+                principal = self._parse_float(ent[principal].get())
+                monthly = self._parse_float(ent[monthly].get())
+                annual_rate = self._parse_float(ent[annual_rate].get())
+                years = self._parse_float(ent[years].get())
+                target_str = ent[target].get().strip()
+                target = self._parse_float(target_str) if target_str !=  else None
+                # Validierung
+                if years = 0
+                    raise ValueError(Ansparzeit muss  0 sein.)
+                if annual_rate  -100
+                    raise ValueError(Ungültiger Zinssatz.)
+                scenarios.append(ScenarioInput(principal, monthly, annual_rate, years, target))
+            except Exception as e
+                messagebox.showerror(Eingabefehler, fFehler in Szenario {idx+1} {e})
+                return
+
+        # Berechnungen
+        results_text = []
+        plot_colors = [tabblue, taborange]
+        self.ax.clear()
+        self.ax.set_xlabel(Jahre)
+        self.ax.set_ylabel(Kapital (€))
+        self.ax.set_title(Vermögensentwicklung — beide Szenarien)
+        self.ax.grid(True)
+
+        # Wir erzeugen eine gemeinsame monatliche Zeitachse bis maximaler Jahre beider Szenarien
+        max_years = max(s.years for s in scenarios)
+        # Erzeuge monatliche Zeitachse
+        n = 12
+        total_months = int(round(max_years  n))
+        common_times = np.linspace(0, max_years, total_months + 1)
+
+        monthly_vals_all = []
+        annual_vals_all = []
+
+        for idx, sc in enumerate(scenarios)
+            # Falls target angegeben berechne benötigte monatliche Sparrate
+            monthly_used = sc.monthly
+            computed_monthly_note = 
+            if sc.target is not None and sc.target  0
+                required = required_monthly_for_target(sc.principal, sc.annual_rate_pct, sc.years, sc.target)
+                if required is None
+                    computed_monthly_note =  (keine Lösung  Division durch 0)
+                else
+                    monthly_used = required
+                    computed_monthly_note = f (berechnete monatliche Sparrate {monthly_used.2f} €)
+            # Endkapital-Berechnungen
+            fv_monthly = fv_monthly_compound(sc.principal, monthly_used, sc.annual_rate_pct, sc.years)
+            fv_annual = fv_annual_compound(sc.principal, monthly_used, sc.annual_rate_pct, sc.years)
+
+            results_text.append(
+                fSzenario {idx+1}n
+                f  Anfangskapital {sc.principal.2f} €n
+                f  Monatliche Sparrate {sc.monthly.2f} €{computed_monthly_note}n
+                f  Jährlicher Zinssatz {sc.annual_rate_pct.3f} %n
+                f  Ansparzeit {sc.years.2f} Jahren
+                f  Endkapital (monatliche Verzinsung) {fv_monthly.2f} €n
+                f  Endkapital (jährliche Verzinsung) {fv_annual.2f} €n
+            )
+            # Zeitreihen
+            times_m, vals_m = timeseries_monthly(sc.principal, monthly_used, sc.annual_rate_pct, sc.years)
+            times_a, vals_a = timeseries_annual(sc.principal, monthly_used, sc.annual_rate_pct, sc.years)
+
+            # Für das Plot wir wollen beide Szenarien auf der 'common_times' Achse
+            # Interpoliere monatliche Werte auf common_times
+            common_vals_m = np.interp(common_times, times_m, vals_m)
+            # Interpoliere annual (sparse) auf common_times
+            common_vals_a = np.interp(common_times, times_a, vals_a)
+
+            monthly_vals_all.append(common_vals_m)
+            annual_vals_all.append(common_vals_a)
+
+            # Plot monatlich = solide Linie, jährlich = gestrichelt
+            color = plot_colors[idx % len(plot_colors)]
+            self.ax.plot(common_times, common_vals_m, label=fS{idx+1} monatlich (r={sc.annual_rate_pct.2f}%), linewidth=2, color=color)
+            self.ax.plot(common_times, common_vals_a, label=fS{idx+1} jährlich (r={sc.annual_rate_pct.2f}%), linestyle='--', linewidth=1.5, color=color)
+
+        self.ax.legend()
+        self.canvas.draw()
+
+        # Zeige Ergebnisse im Textfeld
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, nn.join(results_text))
+        self.result_text.config(state=tk.DISABLED)
+
+        # Speichere Export-Daten für CSV Export
+        self.export_data = {
+            times common_times,
+            monthly_vals monthly_vals_all,
+            annual_vals annual_vals_all
+        }
+
+    # ---------- Hilfsfunktionen ----------
+    @staticmethod
+    def _parse_float(s str) - float
+        Parst einen String in Float, akzeptiert sowohl Komma als auch Punkt.
+        s = s.strip()
+        if s == 
+            raise ValueError(Leeres Feld)
+        # Ersetze Komma durch Punkt
+        s = s.replace(,, .)
+        return float(s)
+
+# ---------- Anwendung starten ----------
+def main()
+    root = tk.Tk()
+    app = ZinseszinsApp(root)
+    root.mainloop()
+
+if __name__ == __main__
+    main()
